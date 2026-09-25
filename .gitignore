@@ -1,0 +1,28 @@
+# Git ignore for Amazon ML Challenge 2026
+
+# Large dataset files and directories (>100MB)
+student_resource/dataset/
+*.tsv
+*.csv
+*.zip
+*.tar.gz
+*.parquet
+
+# Python cache and environment
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+venv/
+env/
+.env
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+__MACOSX/
+.idea/
+.vscode/
+
+# Build artifacts
+output/*.tsv
