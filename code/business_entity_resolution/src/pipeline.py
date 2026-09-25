@@ -103,13 +103,27 @@ def run_pipeline(
     print("=" * 80)
 
     # -------------------------------------------------------------
-    # STEP 1: LOAD GROUND TRUTH & SOURCE 1 RECORDS
+    # STEP 1: LOAD SOURCE 1 RECORDS & ALIGNED GROUND TRUTH
     # -------------------------------------------------------------
-    gt_all = load_ground_truth(os.path.join(train_dir, "train_ground_truth.tsv"), nrows=sample_size)
     s1_all_df = pd.read_csv(os.path.join(train_dir, "train_source1.tsv"), sep="\t", nrows=sample_size)
     for col in s1_all_df.columns:
         s1_all_df[col] = s1_all_df[col].fillna("").astype(str)
     s1_all = s1_all_df.to_dict(orient="records")
+    s1_needed = set(s1_all_df["entity_id"])
+
+    print(f"Loaded {len(s1_all):,} Source 1 reference records. Aligning Ground Truth...")
+    gt_all = {}
+    for chunk in pd.read_csv(os.path.join(train_dir, "train_ground_truth.tsv"), sep="\t", chunksize=150000):
+        sub = chunk[chunk["source1_entity_id"].isin(s1_needed)]
+        for _, r in sub.iterrows():
+            s1 = r["source1_entity_id"]
+            m_str = str(r["matched_entity_ids"]).strip() if pd.notna(r["matched_entity_ids"]) else ""
+            if m_str and m_str.lower() != "nan":
+                gt_all[s1] = set(m.strip() for m in m_str.split(",") if m.strip())
+            else:
+                gt_all[s1] = set()
+        if len(gt_all) >= len(s1_needed):
+            break
 
     # Stratified Train/Val split on S1 entities (90% Train, 10% Val)
     np.random.seed(42)
@@ -122,9 +136,9 @@ def run_pipeline(
 
     train_s1 = [r for r in s1_all if r["entity_id"] in train_s1_id_set]
     val_s1 = [r for r in s1_all if r["entity_id"] in val_s1_id_set]
-    val_gt = {eid: gt_all[eid] for eid in val_s1_id_set if eid in gt_all}
+    val_gt = {eid: gt_all.get(eid, set()) for eid in val_s1_id_set}
 
-    print(f"\nSplit summary: {len(train_s1):,} Train S1, {len(val_s1):,} Validation S1 entities.")
+    print(f"Split summary: {len(train_s1):,} Train S1, {len(val_s1):,} Validation S1 entities.")
 
     # -------------------------------------------------------------
     # STEP 2: LOAD TARGET SOURCES (S2 & S3) FOR TRAINING
@@ -234,6 +248,48 @@ def run_pipeline(
         val_gt,
         threshold_candidates=[0.40, 0.50, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
     )
+
+    # Detailed metrics computation on validation holdout
+    val_probs = matcher.predict_proba(X_val)
+    val_preds_map = collections.defaultdict(set)
+    for p, (s1, cand) in zip(val_probs, val_pair_ids):
+        if p >= best_threshold:
+            val_preds_map[s1].add(cand)
+
+    val_f05_list = []
+    val_precisions = []
+    val_recalls = []
+    total_singletons = 0
+    correct_singletons = 0
+
+    for s1_id, true_set in val_gt.items():
+        pred_set = val_preds_map.get(s1_id, set())
+        from src.model import compute_entity_f05
+        f05 = compute_entity_f05(true_set, pred_set)
+        val_f05_list.append(f05)
+
+        if len(true_set) == 0:
+            total_singletons += 1
+            if len(pred_set) == 0:
+                correct_singletons += 1
+        else:
+            if len(pred_set) > 0:
+                tp = len(true_set.intersection(pred_set))
+                val_precisions.append(tp / len(pred_set))
+                val_recalls.append(tp / len(true_set))
+            else:
+                val_precisions.append(0.0)
+                val_recalls.append(0.0)
+
+    print("\n" + "=" * 80)
+    print("OFFICIAL COMPETITION EVALUATION METRICS (VALIDATION HOLDOUT)")
+    print("=" * 80)
+    print(f"  Macro F_0.5 Score:             {np.mean(val_f05_list):.4f}")
+    print(f"  Macro Precision (non-sing):    {np.mean(val_precisions):.4f} ({np.mean(val_precisions)*100:.2f}%)")
+    print(f"  Macro Recall (non-sing):       {np.mean(val_recalls):.4f} ({np.mean(val_recalls)*100:.2f}%)")
+    print(f"  Singleton Accuracy:            {correct_singletons}/{max(1, total_singletons)} ({correct_singletons/max(1, total_singletons)*100:.2f}%)")
+    print(f"  Total Validation Entities:     {len(val_gt):,}")
+    print("=" * 80)
 
     if eval_only:
         print("\nEval-only mode requested. Skipping test inference.")
